@@ -1,10 +1,12 @@
 const express = require('express');
 const axios = require('axios');
-const ffmpeg = require('fluent-ffmpeg');
-const fs = require('fs').promises;
+const { exec } = require('child_process');
+const fs = require('fs');
 const path = require('path');
 const cors = require('cors');
 const cloudinary = require('cloudinary').v2;
+const util = require('util');
+const execPromise = util.promisify(exec);
 
 const app = express();
 app.use(cors());
@@ -12,21 +14,34 @@ app.use(express.json());
 
 // Configure Cloudinary
 cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME || 'ddoh6pjin',
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET
 });
-
-// Create temp directory on startup
-const tempDir = path.join('/tmp', 'video-processing');
-fs.mkdir(tempDir, { recursive: true }).catch(console.error);
 
 // Health check endpoint
 app.get('/', (req, res) => {
   res.json({ 
     status: 'FFmpeg Video API is running!',
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    port: process.env.PORT || 10000
   });
+});
+
+// Test FFmpeg endpoint
+app.get('/test-ffmpeg', async (req, res) => {
+  try {
+    const { stdout } = await execPromise('ffmpeg -version');
+    res.json({ 
+      success: true,
+      ffmpeg: stdout.split('\n')[0]
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      error: 'FFmpeg not found',
+      details: error.message
+    });
+  }
 });
 
 // Create video endpoint
@@ -40,68 +55,28 @@ app.post('/create-video', async (req, res) => {
   }
 
   const uniqueId = Date.now();
-  const audioPath = path.join(tempDir, `audio_${uniqueId}.mp3`);
-  const imagePath = path.join(tempDir, `image_${uniqueId}.jpg`);
-  const outputPath = path.join(tempDir, `output_${uniqueId}.mp4`);
+  const audioPath = `/tmp/audio_${uniqueId}.mp3`;
+  const imagePath = `/tmp/image_${uniqueId}.jpg`;
+  const outputPath = `/tmp/output_${uniqueId}.mp4`;
 
   try {
-    console.log('Downloading files...');
-    
     // Download audio
-    const audioResponse = await axios({
-      method: 'GET',
-      url: audioUrl,
-      responseType: 'stream'
-    });
-    
-    const writer1 = fs.createWriteStream(audioPath);
-    audioResponse.data.pipe(writer1);
-    await new Promise((resolve, reject) => {
-      writer1.on('finish', resolve);
-      writer1.on('error', reject);
-    });
+    console.log('Downloading audio...');
+    const audioData = await axios.get(audioUrl, { responseType: 'arraybuffer' });
+    fs.writeFileSync(audioPath, audioData.data);
     
     // Download image
-    const imageResponse = await axios({
-      method: 'GET',
-      url: imageUrl,
-      responseType: 'stream'
-    });
-    
-    const writer2 = fs.createWriteStream(imagePath);
-    imageResponse.data.pipe(writer2);
-    await new Promise((resolve, reject) => {
-      writer2.on('finish', resolve);
-      writer2.on('error', reject);
-    });
+    console.log('Downloading image...');
+    const imageData = await axios.get(imageUrl, { responseType: 'arraybuffer' });
+    fs.writeFileSync(imagePath, imageData.data);
 
-    console.log('Creating video...');
+    // Create video using FFmpeg command line
+    console.log('Creating video with FFmpeg...');
+    const ffmpegCommand = `ffmpeg -loop 1 -i ${imagePath} -i ${audioPath} -c:v libx264 -tune stillimage -c:a aac -b:a 192k -pix_fmt yuv420p -shortest -t ${duration} ${outputPath}`;
     
-    // Create video
-    await new Promise((resolve, reject) => {
-      ffmpeg(imagePath)
-        .loop(duration)
-        .addInput(audioPath)
-        .outputOptions([
-          '-c:v libx264',
-          '-tune stillimage',
-          '-c:a aac',
-          '-b:a 192k',
-          '-pix_fmt yuv420p',
-          '-shortest'
-        ])
-        .on('end', () => {
-          console.log('Video created successfully');
-          resolve();
-        })
-        .on('error', (err) => {
-          console.error('FFmpeg error:', err);
-          reject(err);
-        })
-        .save(outputPath);
-    });
-
-    console.log('Uploading to Cloudinary...');
+    await execPromise(ffmpegCommand);
+    
+    console.log('Video created, uploading to Cloudinary...');
     
     // Upload to Cloudinary
     const result = await cloudinary.uploader.upload(outputPath, {
@@ -110,11 +85,9 @@ app.post('/create-video', async (req, res) => {
     });
 
     // Clean up temp files
-    await fs.unlink(audioPath).catch(console.error);
-    await fs.unlink(imagePath).catch(console.error);
-    await fs.unlink(outputPath).catch(console.error);
-
-    console.log('Success! Video URL:', result.secure_url);
+    fs.unlinkSync(audioPath);
+    fs.unlinkSync(imagePath);
+    fs.unlinkSync(outputPath);
     
     res.json({
       success: true,
@@ -123,15 +96,21 @@ app.post('/create-video', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error in create-video:', error);
+    console.error('Error:', error.message);
+    
+    // Clean up files on error
+    [audioPath, imagePath, outputPath].forEach(file => {
+      if (fs.existsSync(file)) fs.unlinkSync(file);
+    });
+    
     res.status(500).json({ 
       error: error.message,
-      details: error.toString()
+      stack: error.stack
     });
   }
 });
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Server is running on port ${PORT}`);
 });
