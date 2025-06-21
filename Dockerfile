@@ -1,7 +1,13 @@
 FROM node:18-alpine
 
-# Install FFmpeg
-RUN apk add --no-cache ffmpeg
+# Install FFmpeg and required dependencies
+RUN apk update && \
+    apk add --no-cache \
+    ffmpeg \
+    python3 \
+    make \
+    g++ \
+    && rm -rf /var/cache/apk/*
 
 # Create app directory
 WORKDIR /usr/src/app
@@ -10,16 +16,17 @@ WORKDIR /usr/src/app
 COPY package*.json ./
 
 # Install dependencies
-RUN npm install
+RUN npm ci --only=production
 
 # Copy app source
 COPY . .
 
-# Create temp directory
-RUN mkdir -p temp
+# Create temp directory with proper permissions
+RUN mkdir -p /tmp/video-processing && \
+    chmod 777 /tmp/video-processing
 
 # Expose port
-EXPOSE 3000
+EXPOSE 10000
 
 # Start the app
-CMD ["npm", "start"]
+CMD ["node", "server.js"]
