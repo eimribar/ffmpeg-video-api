@@ -21,7 +21,7 @@ app.get('/', (req, res) => {
   res.json({ status: 'Running!' });
 });
 
-// Create video - WORKING VERSION
+// Create video - OPTIMIZED FOR STATIC IMAGES
 app.post('/create-video', async (req, res) => {
   const { audioUrl, imageUrl } = req.body;
   
@@ -31,7 +31,7 @@ app.post('/create-video', async (req, res) => {
   const outputPath = `/tmp/output_${uniqueId}.mp4`;
 
   try {
-    // Download files (FFmpeg can't always handle Google Drive URLs directly)
+    // Download files
     console.log('Downloading files...');
     const audioData = await axios.get(audioUrl, { responseType: 'arraybuffer' });
     fs.writeFileSync(audioPath, audioData.data);
@@ -39,9 +39,14 @@ app.post('/create-video', async (req, res) => {
     const imageData = await axios.get(imageUrl, { responseType: 'arraybuffer' });
     fs.writeFileSync(imagePath, imageData.data);
 
-    // Create video with image looped for audio duration
+    // Convert and resize image first (much faster processing)
+    console.log('Preparing image...');
+    const resizedImage = `/tmp/resized_${uniqueId}.jpg`;
+    await execPromise(`ffmpeg -i ${imagePath} -vf scale=1280:720 ${resizedImage} -y`);
+
+    // Create video with 1fps (since it's just a static image)
     console.log('Creating video...');
-    const ffmpegCommand = `ffmpeg -loop 1 -i ${imagePath} -i ${audioPath} -c:v libx264 -preset veryfast -crf 30 -c:a aac -b:a 128k -shortest -pix_fmt yuv420p ${outputPath} -y`;
+    const ffmpegCommand = `ffmpeg -loop 1 -framerate 1 -i ${resizedImage} -i ${audioPath} -c:v libx264 -preset ultrafast -tune stillimage -crf 23 -r 1 -c:a copy -shortest -pix_fmt yuv420p -movflags +faststart ${outputPath} -y`;
     
     await execPromise(ffmpegCommand);
     
@@ -55,6 +60,7 @@ app.post('/create-video', async (req, res) => {
     // Clean up
     fs.unlinkSync(audioPath);
     fs.unlinkSync(imagePath);
+    fs.unlinkSync(resizedImage);
     fs.unlinkSync(outputPath);
     
     res.json({
