@@ -19,32 +19,15 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET
 });
 
-// Health check endpoint
+// Health check
 app.get('/', (req, res) => {
   res.json({ 
     status: 'FFmpeg Video API is running!',
-    timestamp: new Date().toISOString(),
-    port: process.env.PORT || 10000
+    timestamp: new Date().toISOString()
   });
 });
 
-// Test FFmpeg endpoint
-app.get('/test-ffmpeg', async (req, res) => {
-  try {
-    const { stdout } = await execPromise('ffmpeg -version');
-    res.json({ 
-      success: true,
-      ffmpeg: stdout.split('\n')[0]
-    });
-  } catch (error) {
-    res.status(500).json({ 
-      error: 'FFmpeg not found',
-      details: error.message
-    });
-  }
-});
-
-// Create video endpoint
+// Create video endpoint - FIXED VERSION
 app.post('/create-video', async (req, res) => {
   const { audioUrl, imageUrl, duration = 180 } = req.body;
   
@@ -60,34 +43,57 @@ app.post('/create-video', async (req, res) => {
   const outputPath = `/tmp/output_${uniqueId}.mp4`;
 
   try {
-    // Download audio
+    // Download files
     console.log('Downloading audio...');
     const audioData = await axios.get(audioUrl, { responseType: 'arraybuffer' });
     fs.writeFileSync(audioPath, audioData.data);
     
-    // Download image
     console.log('Downloading image...');
     const imageData = await axios.get(imageUrl, { responseType: 'arraybuffer' });
     fs.writeFileSync(imagePath, imageData.data);
 
-    // Create video using FFmpeg command line
-    console.log('Creating video with FFmpeg...');
-    const ffmpegCommand = `ffmpeg -loop 1 -i ${imagePath} -i ${audioPath} -c:v libx264 -tune stillimage -c:a aac -b:a 192k -pix_fmt yuv420p -shortest -t ${duration} ${outputPath}`;
+    // Convert image to proper JPEG if needed and resize
+    console.log('Preparing image...');
+    await execPromise(`ffmpeg -i ${imagePath} -vf "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2" -q:v 2 ${imagePath}.converted.jpg -y`);
     
-    await execPromise(ffmpegCommand);
+    // Use the converted image
+    const finalImagePath = `${imagePath}.converted.jpg`;
+
+    // Create video with more efficient settings
+    console.log('Creating video with optimized settings...');
+    const ffmpegCommand = `ffmpeg -loop 1 -framerate 1 -i ${finalImagePath} -i ${audioPath} -c:v libx264 -preset veryfast -crf 30 -r 1 -c:a copy -shortest -movflags +faststart ${outputPath} -y`;
     
-    console.log('Video created, uploading to Cloudinary...');
+    console.log('Running:', ffmpegCommand);
+    
+    const { stdout, stderr } = await execPromise(ffmpegCommand, {
+      timeout: 120000 // 2 minute timeout
+    });
+    
+    console.log('FFmpeg output:', stderr);
+    
+    // Check if file was created
+    if (!fs.existsSync(outputPath)) {
+      throw new Error('Video file was not created');
+    }
+    
+    const stats = fs.statSync(outputPath);
+    console.log('Video created, size:', stats.size);
+
+    console.log('Uploading to Cloudinary...');
     
     // Upload to Cloudinary
     const result = await cloudinary.uploader.upload(outputPath, {
       resource_type: 'video',
-      folder: 'linkedin-songs'
+      folder: 'linkedin-songs',
+      timeout: 120000
     });
 
     // Clean up temp files
-    fs.unlinkSync(audioPath);
-    fs.unlinkSync(imagePath);
-    fs.unlinkSync(outputPath);
+    [audioPath, imagePath, finalImagePath, outputPath].forEach(file => {
+      if (fs.existsSync(file)) fs.unlinkSync(file);
+    });
+    
+    console.log('Success! Video URL:', result.secure_url);
     
     res.json({
       success: true,
@@ -97,15 +103,16 @@ app.post('/create-video', async (req, res) => {
 
   } catch (error) {
     console.error('Error:', error.message);
+    console.error('Stack:', error.stack);
     
     // Clean up files on error
-    [audioPath, imagePath, outputPath].forEach(file => {
+    [audioPath, imagePath, `${imagePath}.converted.jpg`, outputPath].forEach(file => {
       if (fs.existsSync(file)) fs.unlinkSync(file);
     });
     
     res.status(500).json({ 
       error: error.message,
-      stack: error.stack
+      details: error.stderr || error.stack
     });
   }
 });
